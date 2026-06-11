@@ -105,6 +105,7 @@ export type Constraint =
 export interface HandLine {
   id: string;
   section: string; // your own labels: "Year" | "2468" | "Like Numbers" | ...
+  description?: string; // short human note, e.g. "Any 3 Suits"
   label: string; // human-readable, e.g. "FF + 2026 in three suits"
   points: number;
   concealed: boolean; // must be played fully concealed?

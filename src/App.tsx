@@ -9,7 +9,7 @@ import {
   type Direction,
   type Player,
 } from './game/game-engine';
-import { exampleCard } from './game/mahjong-data-model';
+import { mockCard as exampleCard } from './game/card';
 import type { Tile, TileType } from './game/mahjong-data-model';
 
 /* ---------- tile display (shared) ---------- */
