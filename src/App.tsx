@@ -3,7 +3,9 @@ import {
   createGame,
   applyAction,
   winCheck,
+  isJoker,
   type GameState,
+  type Direction,
 } from './game/game-engine';
 import { exampleCard } from './game/mahjong-data-model';
 import type { Tile, TileType } from './game/mahjong-data-model';
@@ -59,14 +61,26 @@ function TileView({
   onClick,
   drawn,
   small,
+  selected,
+  locked,
 }: {
   tile: Tile;
   onClick?: () => void;
   drawn?: boolean;
   small?: boolean;
+  selected?: boolean;
+  locked?: boolean;
 }) {
   const f = tileFace(tile.type);
-  const cls = ['tile', small ? 'small' : '', onClick ? 'clickable' : '', drawn ? 'drawn' : '']
+  const handleClick = locked ? undefined : onClick;
+  const cls = [
+    'tile',
+    small ? 'small' : '',
+    handleClick ? 'clickable' : '',
+    drawn ? 'drawn' : '',
+    selected ? 'selected' : '',
+    locked ? 'locked' : '',
+  ]
     .filter(Boolean)
     .join(' ');
   const inner = (
@@ -77,28 +91,138 @@ function TileView({
       <span className="tile-label">{f.label}</span>
     </>
   );
-  if (onClick) {
+  if (handleClick) {
     return (
-      <button type="button" className={cls} onClick={onClick} title={`${f.glyph} ${f.label}`}>
+      <button type="button" className={cls} onClick={handleClick} title={`${f.glyph} ${f.label}`}>
         {inner}
       </button>
     );
   }
   return (
-    <div className={cls} title={`${f.glyph} ${f.label}`}>
+    <div className={cls} title={locked ? 'Jokers cannot be passed' : `${f.glyph} ${f.label}`}>
       {inner}
     </div>
   );
 }
 
-/* ---------- the board ---------- */
+const DIR_WORD: Record<Direction, string> = {
+  right: 'to the right',
+  across: 'across the table',
+  left: 'to the left',
+};
+
+function sortHand(hand: Tile[]): Tile[] {
+  return [...hand].sort((a, b) => sortKey(a.type) - sortKey(b.type));
+}
+
+/* ---------- app ---------- */
 
 export default function App() {
   const [state, setState] = useState<GameState>(() => createGame(exampleCard));
+  const [selected, setSelected] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
 
+  function newGame() {
+    setState(createGame(exampleCard));
+    setSelected([]);
+    setNotice(null);
+  }
+
+  /* ----- Charleston: tile-selection screen ----- */
+  if (state.phase === 'charleston' && state.charleston) {
+    const c = state.charleston;
+    const player = state.players[c.selecting];
+    const dir = c.queue[0];
+    const roundLabel = c.round === 1 ? 'First Charleston' : 'Second Charleston';
+    const passNo = 4 - c.queue.length; // 1, 2, or 3
+
+    function toggle(t: Tile) {
+      if (isJoker(t)) return;
+      setSelected((cur) =>
+        cur.includes(t.id) ? cur.filter((x) => x !== t.id) : cur.length < 3 ? [...cur, t.id] : cur,
+      );
+    }
+    function confirmPass() {
+      if (selected.length !== 3) return;
+      setState(applyAction(state, { type: 'charlestonSelect', tileIds: selected }));
+      setSelected([]);
+    }
+
+    return (
+      <div className="table">
+        <style>{CSS}</style>
+        <header className="head">
+          <h1>mahj</h1>
+          <p className="status">
+            {roundLabel} · pass {passNo} of 3 — {player.name}, pick 3 tiles to pass {DIR_WORD[dir]}
+          </p>
+        </header>
+
+        <section className="tray">
+          <div className="tiles">
+            {sortHand(player.hand).map((t) => (
+              <TileView
+                key={t.id}
+                tile={t}
+                locked={isJoker(t)}
+                selected={selected.includes(t.id)}
+                onClick={() => toggle(t)}
+              />
+            ))}
+          </div>
+        </section>
+
+        <p className="select-info">Selected {selected.length} / 3 · jokers can&apos;t be passed</p>
+
+        <footer className="controls">
+          <button className="btn primary" disabled={selected.length !== 3} onClick={confirmPass}>
+            Pass these 3 →
+          </button>
+          <button className="btn ghost" onClick={() => setState(applyAction(state, { type: 'skipCharleston' }))}>
+            Skip Charleston
+          </button>
+        </footer>
+
+        <p className="hotseat-note">
+          Pass the device to {player.name} to choose, then to the next player after each pass.
+        </p>
+      </div>
+    );
+  }
+
+  /* ----- Charleston: second-Charleston decision ----- */
+  if (state.phase === 'charlestonDecision') {
+    return (
+      <div className="table">
+        <style>{CSS}</style>
+        <header className="head">
+          <h1>mahj</h1>
+          <p className="status">First Charleston complete</p>
+        </header>
+        <div className="decision">
+          <p>Run an optional second Charleston (3 more passes)?</p>
+          <div className="controls">
+            <button
+              className="btn primary"
+              onClick={() => setState(applyAction(state, { type: 'charlestonSecond', agree: true }))}
+            >
+              Yes, pass again
+            </button>
+            <button
+              className="btn"
+              onClick={() => setState(applyAction(state, { type: 'charlestonSecond', agree: false }))}
+            >
+              No — start playing
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ----- the play board (playing / won / exhausted) ----- */
   const current = state.players[state.turn];
-  const sortedHand = [...current.hand].sort((a, b) => sortKey(a.type) - sortKey(b.type));
+  const sortedHand = sortHand(current.hand);
   const canDraw = state.phase === 'playing' && !state.awaitingDiscard;
   const canDiscard = state.phase === 'playing' && state.awaitingDiscard;
   const winAvailable = winCheck(state) !== null;
@@ -117,10 +241,6 @@ export default function App() {
       setNotice('Not a complete hand from the card yet.');
       window.setTimeout(() => setNotice(null), 2500);
     }
-  }
-  function newGame() {
-    setState(createGame(exampleCard));
-    setNotice(null);
   }
 
   let status: string;
@@ -143,7 +263,6 @@ export default function App() {
         <p className="status">{status}</p>
       </header>
 
-      {/* seats */}
       <div className="seats">
         {state.players.map((p, i) => (
           <div key={p.id} className={`seat ${i === state.turn ? 'active' : ''}`}>
@@ -153,7 +272,6 @@ export default function App() {
         ))}
       </div>
 
-      {/* discard pile */}
       <section className="discard-area">
         <div className="discard-title">Discards</div>
         {state.discards.length === 0 ? (
@@ -167,7 +285,6 @@ export default function App() {
         )}
       </section>
 
-      {/* current player's hand */}
       <section className="tray">
         <div className="tiles">
           {sortedHand.map((t) => (
@@ -181,7 +298,6 @@ export default function App() {
         </div>
       </section>
 
-      {/* banners */}
       {state.phase === 'won' && (
         <div className="banner win">
           🎉 {state.players[state.winner!].name} wins with{' '}
@@ -192,14 +308,13 @@ export default function App() {
         <div className="banner wash">No tiles left — nobody completed a hand.</div>
       )}
 
-      {/* controls */}
       <footer className="controls">
-        {state.phase === 'playing' && canDraw && (
+        {canDraw && (
           <button className="btn primary" onClick={draw}>
             Draw tile
           </button>
         )}
-        {state.phase === 'playing' && canDiscard && (
+        {canDiscard && (
           <>
             <span className="hint">Tap a tile above to discard it</span>
             <button className={`btn ${winAvailable ? 'glow' : ''}`} onClick={declare}>
@@ -245,77 +360,39 @@ body { margin: 0; background: #0e3b2e; }
 .head h1 {
   margin: 0;
   font-family: Georgia, 'Times New Roman', serif;
-  font-size: 40px;
-  letter-spacing: 2px;
-  font-weight: 600;
-  color: #f4ead2;
+  font-size: 40px; letter-spacing: 2px; font-weight: 600; color: #f4ead2;
 }
-.status {
-  margin: 6px 0 0;
-  font-size: 14px;
-  letter-spacing: 1px;
-  color: #bcd8cb;
-}
+.status { margin: 6px 0 0; font-size: 14px; letter-spacing: 1px; color: #bcd8cb; max-width: 640px; }
 
 .seats { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 .seat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  min-width: 84px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: rgba(0,0,0,0.22);
-  border: 1px solid rgba(255,255,255,0.08);
+  display: flex; flex-direction: column; align-items: center; min-width: 84px;
+  padding: 8px 12px; border-radius: 10px;
+  background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08);
 }
-.seat.active {
-  background: rgba(244,234,210,0.16);
-  border-color: #f4ead2;
-  box-shadow: 0 0 0 1px #f4ead2 inset;
-}
+.seat.active { background: rgba(244,234,210,0.16); border-color: #f4ead2; box-shadow: 0 0 0 1px #f4ead2 inset; }
 .seat-name { font-size: 13px; font-weight: 600; color: #f4ead2; }
 .seat-count { font-size: 11px; color: #9cc3b2; margin-top: 2px; }
 
 .discard-area { width: 100%; max-width: 880px; text-align: center; }
-.discard-title {
-  font-size: 11px;
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  color: #80a795;
-  margin-bottom: 8px;
-}
+.discard-title { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #80a795; margin-bottom: 8px; }
 .discard-empty { font-size: 13px; color: #6f9486; font-style: italic; }
 
 .tray {
-  max-width: 880px;
-  padding: 18px 18px 22px;
-  border-radius: 16px;
+  max-width: 880px; padding: 18px 18px 22px; border-radius: 16px;
   background: linear-gradient(180deg, #8a5a33 0%, #6f4625 60%, #5d3a1e 100%);
-  box-shadow:
-    inset 0 2px 0 rgba(255,255,255,0.18),
-    inset 0 -10px 18px rgba(0,0,0,0.35),
-    0 16px 30px rgba(0,0,0,0.4);
+  box-shadow: inset 0 2px 0 rgba(255,255,255,0.18), inset 0 -10px 18px rgba(0,0,0,0.35), 0 16px 30px rgba(0,0,0,0.4);
 }
 
 .tiles { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 
 .tile {
-  appearance: none;
-  border: none;
-  font: inherit;
-  color: inherit;
-  width: 50px;
-  height: 68px;
-  border-radius: 8px;
+  appearance: none; border: none; font: inherit; color: inherit;
+  width: 50px; height: 68px; border-radius: 8px;
   background: linear-gradient(180deg, #fffdf6 0%, #f3ecd9 100%);
   box-shadow: inset 0 1px 0 #ffffff, 0 3px 0 #cdbf9e, 0 6px 10px rgba(0,0,0,0.35);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  user-select: none;
-  cursor: default;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  user-select: none; cursor: default;
   transition: transform 120ms ease, box-shadow 120ms ease;
 }
 .tile.small { width: 38px; height: 52px; gap: 2px; }
@@ -323,14 +400,18 @@ body { margin: 0; background: #0e3b2e; }
 .tile.clickable:hover { transform: translateY(-5px); }
 .tile.clickable:focus-visible { outline: 3px solid #9cc3b2; outline-offset: 2px; }
 .tile.drawn { box-shadow: inset 0 1px 0 #fff, 0 3px 0 #cdbf9e, 0 0 0 3px #f4c64a, 0 6px 12px rgba(0,0,0,0.4); }
+.tile.selected { transform: translateY(-9px); box-shadow: inset 0 1px 0 #fff, 0 3px 0 #cdbf9e, 0 0 0 3px #5fb0e0, 0 8px 14px rgba(0,0,0,0.45); }
+.tile.locked { opacity: 0.4; cursor: not-allowed; }
 
-.tile-glyph {
-  font-size: 26px; font-weight: 700; line-height: 1;
-  font-family: 'Hiragino Sans', 'Segoe UI', system-ui, sans-serif;
-}
+.tile-glyph { font-size: 26px; font-weight: 700; line-height: 1; font-family: 'Hiragino Sans', 'Segoe UI', system-ui, sans-serif; }
 .tile.small .tile-glyph { font-size: 19px; }
 .tile-label { font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: #8a7e63; font-weight: 600; }
 .tile.small .tile-label { font-size: 7px; }
+
+.select-info { font-size: 13px; color: #bcd8cb; margin: 0; }
+
+.decision { text-align: center; display: flex; flex-direction: column; gap: 18px; align-items: center; }
+.decision p { font-size: 16px; color: #eaf2ee; margin: 0; }
 
 .banner { padding: 12px 20px; border-radius: 12px; font-size: 16px; font-weight: 600; text-align: center; }
 .banner.win { background: linear-gradient(180deg, #f6e7b8, #ecd28f); color: #5d3a1e; }
@@ -348,20 +429,15 @@ body { margin: 0; background: #0e3b2e; }
 .btn:hover { transform: translateY(-1px); }
 .btn:active { transform: translateY(3px); box-shadow: 0 1px 0 #b59b6a, 0 3px 8px rgba(0,0,0,0.3); }
 .btn:focus-visible { outline: 3px solid #9cc3b2; outline-offset: 2px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: 0 4px 0 #b59b6a; }
 .btn.primary { background: linear-gradient(180deg, #ffe9a8, #f4c64a); }
 .btn.ghost { background: rgba(255,255,255,0.1); color: #eaf2ee; box-shadow: none; border: 1px solid rgba(255,255,255,0.2); }
 .btn.ghost:active { transform: translateY(1px); }
 .btn.glow { box-shadow: 0 0 0 2px #f4c64a, 0 4px 0 #b59b6a, 0 0 18px #f4c64a; }
 
 .notice { padding: 8px 16px; border-radius: 8px; background: rgba(0,0,0,0.45); color: #ffd9a8; font-size: 13px; }
-
 .hotseat-note { font-size: 12px; color: #6f9486; max-width: 520px; text-align: center; margin: 0; }
 
-@media (prefers-reduced-motion: reduce) {
-  .tile, .btn { transition: none; }
-}
-@media (max-width: 480px) {
-  .tile { width: 42px; height: 58px; }
-  .tile-glyph { font-size: 22px; }
-}
+@media (prefers-reduced-motion: reduce) { .tile, .btn { transition: none; } }
+@media (max-width: 480px) { .tile { width: 42px; height: 58px; } .tile-glyph { font-size: 22px; } }
 `;
