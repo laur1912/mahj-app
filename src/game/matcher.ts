@@ -223,3 +223,83 @@ export function findWinningHand(
   }
   return null;
 }
+
+/* ---------- Suggestions: how close are your tiles to each hand? ---------- */
+
+export interface HandSuggestion {
+  hand: HandLine;
+  away: number; // how many tiles you'd need to swap to complete it (0 = done)
+}
+
+/**
+ * Fewest tiles you are from completing this hand, over every legal assignment.
+ * Counts real tiles that fit, plus jokers filling joker-eligible (pung+) slots.
+ */
+export function handCloseness(tiles: Tile[], hand: HandLine): number {
+  const reals = new Map<string, number>();
+  let jokers = 0;
+  for (const t of tiles) {
+    if (t.type.kind === 'joker') {
+      jokers += 1;
+      continue;
+    }
+    const k = tileKeyFromType(t.type);
+    reals.set(k, (reals.get(k) ?? 0) + 1);
+  }
+
+  const usedSlots = [
+    ...new Set(hand.groups.map((g) => g.suitSlot).filter((s): s is SuitSlot => Boolean(s))),
+  ];
+  const suitCombos: Suit[][] = usedSlots.length ? cartesian(usedSlots.map(() => SUITS)) : [[]];
+  const vars = hand.variables ?? [];
+  const varCombos: number[][] = vars.length ? cartesian(vars.map((v) => v.domain)) : [[]];
+
+  let best = 14;
+  for (const suits of suitCombos) {
+    if (!suitAssignmentLegal(hand, suits)) continue;
+    const suitMap: Partial<Record<SuitSlot, Suit>> = {};
+    usedSlots.forEach((slot, i) => {
+      suitMap[slot] = suits[i];
+    });
+    for (const values of varCombos) {
+      const varMap: Record<string, number> = {};
+      vars.forEach((v, i) => {
+        varMap[v.name] = values[i];
+      });
+      if (!varAssignmentLegal(hand, varMap)) continue;
+
+      const need = new Map<string, { strict: number; jokerable: number }>();
+      for (const g of hand.groups) {
+        const key = groupTileKey(g, suitMap, varMap);
+        const jokerable = g.count >= 3 && hand.jokersAllowed;
+        const cur = need.get(key) ?? { strict: 0, jokerable: 0 };
+        if (jokerable) cur.jokerable += g.count;
+        else cur.strict += g.count;
+        need.set(key, cur);
+      }
+
+      let matched = 0;
+      let jokerableLeft = 0;
+      for (const [key, { strict, jokerable }] of need) {
+        const have = reals.get(key) ?? 0;
+        const used = Math.min(have, strict + jokerable);
+        matched += used;
+        jokerableLeft += jokerable - Math.max(0, used - strict);
+      }
+      matched += Math.min(jokers, jokerableLeft);
+
+      const away = 14 - matched;
+      if (away < best) best = away;
+      if (best === 0) return 0;
+    }
+  }
+  return best;
+}
+
+/** The hands your tiles are closest to, nearest first. */
+export function suggestHands(tiles: Tile[], card: HandLine[], top = 4): HandSuggestion[] {
+  return card
+    .map((hand) => ({ hand, away: handCloseness(tiles, hand) }))
+    .sort((a, b) => a.away - b.away)
+    .slice(0, top);
+}
