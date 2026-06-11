@@ -2,49 +2,63 @@
  * GAME ENGINE — one 4-player game, pure logic (no UI, no network).
  *
  * Flow:
- *   1. CHARLESTON (step 4): before play, players pass tiles in fixed directions.
- *        First Charleston:  pass 3 right, 3 across, 3 left  (mandatory)
- *        Second Charleston: pass 3 left, 3 across, 3 right  (optional)
- *      Jokers can never be passed. Each pass is simultaneous: all four players
- *      choose 3 tiles, then everyone swaps at once.
- *   2. PLAY (steps 1-3): draw a tile, discard a tile, turn passes. Declare
- *      mahjong while holding 14 tiles if they complete a card hand.
+ *   1. CHARLESTON: pass tiles right/across/left (mandatory), optional second
+ *      round left/across/right. Jokers can never be passed.
+ *   2. PLAY: draw a tile, discard a tile, turn passes.
+ *   3. CALLING (step 5): after any discard, if another player can use it they
+ *      may CLAIM it:
+ *        - pung  (they hold 2 matching real tiles) -> expose 3 face-up
+ *        - kong  (they hold 3 matching real tiles) -> expose 4 face-up
+ *        - mahjong (the discard completes their hand) -> they win
+ *      A claim jumps the turn to the caller, who then discards. If nobody can
+ *      claim, play simply moves to the next seat.
  *
- * Calling/exposing other players' discards (step 5) comes next.
+ * Win = concealed hand + exposed melds together form a hand on the card.
  *
- * Built as a reducer: applyAction(state, action) returns a new state and never
- * mutates the input.
+ * Reducer style: applyAction(state, action) returns a new state, never mutates.
+ *
+ * MVP simplifications (refined later): no joker-in-exposure or joker redemption;
+ * exposures aren't checked against a specific card hand; flowers/jokers can't be
+ * claimed; with multiple eligible callers the UI lets players choose rather than
+ * auto-enforcing seat priority.
  */
 
 import { shuffle } from './wall';
-import { buildTileSet, type Tile, type HandLine } from './mahjong-data-model';
+import {
+  buildTileSet,
+  type Tile,
+  type TileType,
+  type HandLine,
+} from './mahjong-data-model';
 import { findWinningHand, type MatchResult } from './matcher';
 
 export interface Player {
   id: number;
   name: string;
-  hand: Tile[];
+  hand: Tile[]; // concealed tiles
+  exposures: Tile[][]; // face-up melds (each 3-4 tiles)
 }
 
 export type Direction = 'right' | 'across' | 'left';
 const OFFSET: Record<Direction, number> = { right: 1, across: 2, left: 3 };
 
 export interface CharlestonState {
-  queue: Direction[]; // remaining passes this Charleston; current pass = queue[0]
-  round: 1 | 2; // first or second Charleston
-  selecting: number; // which player is choosing tiles right now (0-3)
-  selections: (string[] | null)[]; // each player's chosen 3 tile ids for the current pass
+  queue: Direction[];
+  round: 1 | 2;
+  selecting: number;
+  selections: (string[] | null)[];
 }
 
 export type Phase =
   | 'charleston'
-  | 'charlestonDecision' // asking whether to run the optional second Charleston
+  | 'charlestonDecision'
   | 'playing'
+  | 'callWindow' // a discard is on the table and at least one player can claim it
   | 'won'
   | 'exhausted';
 
 export interface GameState {
-  players: Player[]; // always 4
+  players: Player[];
   wall: Tile[];
   discards: Tile[];
   turn: number;
@@ -52,6 +66,8 @@ export interface GameState {
   lastDrawnId: string | null;
   phase: Phase;
   charleston: CharlestonState | null;
+  pendingDiscard: Tile | null; // the claimable tile during a call window
+  discarder: number | null; // who threw it
   winner: number | null;
   winningHand: HandLine | null;
   card: HandLine[];
@@ -63,14 +79,83 @@ export type Action =
   | { type: 'skipCharleston' }
   | { type: 'draw' }
   | { type: 'discard'; tileId: string }
-  | { type: 'declareWin' };
+  | { type: 'declareWin' }
+  | { type: 'call'; player: number; kind: 'pung' | 'kong' | 'mahjong' }
+  | { type: 'passCall' };
 
-/** Deal a fresh game and open the Charleston. */
+/* ---------- helpers ---------- */
+
+export function isJoker(t: Tile): boolean {
+  return t.type.kind === 'joker';
+}
+
+/** Identity key for matching tiles of the same kind/value. */
+function typeKey(t: TileType): string {
+  switch (t.kind) {
+    case 'suit':
+      return `s${t.suit}${t.value}`;
+    case 'wind':
+      return `w${t.wind}`;
+    case 'dragon':
+      return `d${t.dragon}`;
+    case 'flower':
+      return 'f';
+    case 'joker':
+      return 'j';
+  }
+}
+
+/** All tiles that count toward a win: concealed hand + every exposed meld. */
+function handForWin(p: Player): Tile[] {
+  return [...p.hand, ...p.exposures.flat()];
+}
+
+/** A player with any exposure can no longer win a concealed-only hand. */
+function cardFor(p: Player, card: HandLine[]): HandLine[] {
+  return p.exposures.length > 0 ? card.filter((h) => !h.concealed) : card;
+}
+
+export interface CallOptions {
+  pung: boolean;
+  kong: boolean;
+  mahjong: HandLine | null;
+}
+
+/** What, if anything, this player could claim the current discard for. */
+export function callOptions(s: GameState, player: number): CallOptions {
+  const none: CallOptions = { pung: false, kong: false, mahjong: null };
+  if (s.phase !== 'callWindow' || !s.pendingDiscard || player === s.discarder) return none;
+
+  const key = typeKey(s.pendingDiscard.type);
+  if (key === 'j') return none; // jokers can't be claimed
+
+  const p = s.players[player];
+  const matches = p.hand.filter((t) => !isJoker(t) && typeKey(t.type) === key).length;
+  const allowPungKong = key !== 'f'; // flowers aren't punged
+  const full = [...p.hand, ...p.exposures.flat(), s.pendingDiscard];
+  const found = full.length === 14 ? findWinningHand(full, cardFor(p, s.card)) : null;
+
+  return {
+    pung: allowPungKong && matches >= 2,
+    kong: allowPungKong && matches >= 3,
+    mahjong: found ? found.hand : null,
+  };
+}
+
+function anyoneCanCall(s: GameState): boolean {
+  return s.players.some((_, i) => {
+    const o = callOptions(s, i);
+    return o.pung || o.kong || o.mahjong !== null;
+  });
+}
+
+/* ---------- setup ---------- */
+
 export function createGame(card: HandLine[]): GameState {
   let deck = shuffle(buildTileSet());
   const players: Player[] = [];
   for (let i = 0; i < 4; i += 1) {
-    players.push({ id: i, name: `Player ${i + 1}`, hand: deck.slice(0, 13) });
+    players.push({ id: i, name: `Player ${i + 1}`, hand: deck.slice(0, 13), exposures: [] });
     deck = deck.slice(13);
   }
   return {
@@ -82,17 +167,14 @@ export function createGame(card: HandLine[]): GameState {
     lastDrawnId: null,
     phase: 'charleston',
     charleston: { queue: ['right', 'across', 'left'], round: 1, selecting: 0, selections: [null, null, null, null] },
+    pendingDiscard: null,
+    discarder: null,
     winner: null,
     winningHand: null,
     card,
   };
 }
 
-export function isJoker(t: Tile): boolean {
-  return t.type.kind === 'joker';
-}
-
-/** A legal Charleston selection: exactly 3 distinct tiles from the hand, no jokers. */
 export function validCharlestonSelection(hand: Tile[], ids: string[]): boolean {
   if (ids.length !== 3 || new Set(ids).size !== 3) return false;
   const byId = new Map(hand.map((t) => [t.id, t]));
@@ -103,10 +185,18 @@ export function validCharlestonSelection(hand: Tile[], ids: string[]): boolean {
 }
 
 function startPlay(s: GameState): GameState {
-  return { ...s, phase: 'playing', charleston: null, turn: 0, awaitingDiscard: false, lastDrawnId: null };
+  return {
+    ...s,
+    phase: 'playing',
+    charleston: null,
+    turn: 0,
+    awaitingDiscard: false,
+    lastDrawnId: null,
+    pendingDiscard: null,
+    discarder: null,
+  };
 }
 
-/** Everyone has chosen 3 tiles for the current pass — swap them all at once. */
 function resolveCharlestonPass(s: GameState): GameState {
   const c = s.charleston!;
   const offset = OFFSET[c.queue[0]];
@@ -114,10 +204,9 @@ function resolveCharlestonPass(s: GameState): GameState {
   const sent = s.players.map((p, i) => sel[i].map((id) => p.hand.find((t) => t.id === id)!));
   const players = s.players.map((p, j) => {
     const keep = p.hand.filter((t) => !sel[j].includes(t.id));
-    const received = sent[(j - offset + 4) % 4]; // who passes to seat j
+    const received = sent[(j - offset + 4) % 4];
     return { ...p, hand: [...keep, ...received] };
   });
-
   const queue = c.queue.slice(1);
   if (queue.length > 0) {
     return { ...s, players, charleston: { ...c, queue, selecting: 0, selections: [null, null, null, null] } };
@@ -127,6 +216,8 @@ function resolveCharlestonPass(s: GameState): GameState {
   }
   return startPlay({ ...s, players });
 }
+
+/* ---------- reducer ---------- */
 
 export function applyAction(s: GameState, a: Action): GameState {
   switch (a.type) {
@@ -177,31 +268,93 @@ export function applyAction(s: GameState, a: Action): GameState {
       const idx = cur.hand.findIndex((t) => t.id === a.tileId);
       if (idx === -1) return s;
       const tile = cur.hand[idx];
-      const newHand = cur.hand.filter((_, i) => i !== idx);
+      const players = s.players.map((p, i) =>
+        i === s.turn ? { ...p, hand: p.hand.filter((_, k) => k !== idx) } : p,
+      );
+      const offered: GameState = {
+        ...s,
+        players,
+        discards: [...s.discards, tile],
+        phase: 'callWindow',
+        pendingDiscard: tile,
+        discarder: s.turn,
+        awaitingDiscard: false,
+        lastDrawnId: null,
+      };
+      // Only stop for a call window if someone can actually claim it.
+      if (anyoneCanCall(offered)) return offered;
+      return {
+        ...offered,
+        phase: 'playing',
+        turn: (s.turn + 1) % 4,
+        pendingDiscard: null,
+        discarder: null,
+      };
+    }
+
+    case 'passCall': {
+      if (s.phase !== 'callWindow' || s.discarder === null) return s;
       return {
         ...s,
-        players: s.players.map((p, i) => (i === s.turn ? { ...p, hand: newHand } : p)),
-        discards: [...s.discards, tile],
-        turn: (s.turn + 1) % 4,
+        phase: 'playing',
+        turn: (s.discarder + 1) % 4,
+        pendingDiscard: null,
+        discarder: null,
         awaitingDiscard: false,
+      };
+    }
+
+    case 'call': {
+      if (s.phase !== 'callWindow' || !s.pendingDiscard) return s;
+      const opts = callOptions(s, a.player);
+
+      if (a.kind === 'mahjong') {
+        if (!opts.mahjong) return s;
+        return { ...s, phase: 'won', winner: a.player, winningHand: opts.mahjong, pendingDiscard: null, discarder: null };
+      }
+      if (a.kind === 'pung' && !opts.pung) return s;
+      if (a.kind === 'kong' && !opts.kong) return s;
+
+      const need = a.kind === 'pung' ? 2 : 3;
+      const key = typeKey(s.pendingDiscard.type);
+      const caller = s.players[a.player];
+      const matching: Tile[] = [];
+      const rest: Tile[] = [];
+      for (const t of caller.hand) {
+        if (matching.length < need && !isJoker(t) && typeKey(t.type) === key) matching.push(t);
+        else rest.push(t);
+      }
+      const exposure = [...matching, s.pendingDiscard];
+      const discardId = s.pendingDiscard.id;
+      return {
+        ...s,
+        players: s.players.map((p, i) =>
+          i === a.player ? { ...p, hand: rest, exposures: [...p.exposures, exposure] } : p,
+        ),
+        discards: s.discards.filter((t) => t.id !== discardId),
+        phase: 'playing',
+        turn: a.player,
+        awaitingDiscard: true,
+        pendingDiscard: null,
+        discarder: null,
         lastDrawnId: null,
       };
     }
 
     case 'declareWin': {
-      if (s.phase !== 'playing') return s;
-      const found = findWinningHand(s.players[s.turn].hand, s.card);
-      if (s.awaitingDiscard && found) {
-        return { ...s, phase: 'won', winner: s.turn, winningHand: found.hand };
-      }
+      if (s.phase !== 'playing' || !s.awaitingDiscard) return s;
+      const p = s.players[s.turn];
+      const found = findWinningHand(handForWin(p), cardFor(p, s.card));
+      if (found) return { ...s, phase: 'won', winner: s.turn, winningHand: found.hand };
       return s;
     }
   }
 }
 
-/** Is the current player holding a winning 14-tile hand right now? */
+/** Is the current player holding a winning hand right now (for the glow hint)? */
 export function winCheck(s: GameState): MatchResult | null {
   if (s.phase !== 'playing' || !s.awaitingDiscard) return null;
-  const found = findWinningHand(s.players[s.turn].hand, s.card);
+  const p = s.players[s.turn];
+  const found = findWinningHand(handForWin(p), cardFor(p, s.card));
   return found ? found.result : null;
 }

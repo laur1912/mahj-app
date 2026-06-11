@@ -3,9 +3,11 @@ import {
   createGame,
   applyAction,
   winCheck,
+  callOptions,
   isJoker,
   type GameState,
   type Direction,
+  type Player,
 } from './game/game-engine';
 import { exampleCard } from './game/mahjong-data-model';
 import type { Tile, TileType } from './game/mahjong-data-model';
@@ -105,6 +107,30 @@ function TileView({
   );
 }
 
+function Seats({ players, activeSeat }: { players: Player[]; activeSeat: number }) {
+  return (
+    <div className="seats">
+      {players.map((p, i) => (
+        <div key={p.id} className={`seat ${i === activeSeat ? 'active' : ''}`}>
+          <span className="seat-name">{p.name}</span>
+          <span className="seat-count">{p.hand.length} concealed</span>
+          {p.exposures.length > 0 && (
+            <div className="exposures">
+              {p.exposures.map((meld, k) => (
+                <div className="meld" key={k}>
+                  {meld.map((t) => (
+                    <TileView key={t.id} tile={t} small />
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const DIR_WORD: Record<Direction, string> = {
   right: 'to the right',
   across: 'across the table',
@@ -128,13 +154,13 @@ export default function App() {
     setNotice(null);
   }
 
-  /* ----- Charleston: tile-selection screen ----- */
+  /* ----- Charleston: tile-selection ----- */
   if (state.phase === 'charleston' && state.charleston) {
     const c = state.charleston;
     const player = state.players[c.selecting];
     const dir = c.queue[0];
     const roundLabel = c.round === 1 ? 'First Charleston' : 'Second Charleston';
-    const passNo = 4 - c.queue.length; // 1, 2, or 3
+    const passNo = 4 - c.queue.length;
 
     function toggle(t: Tile) {
       if (isJoker(t)) return;
@@ -157,7 +183,6 @@ export default function App() {
             {roundLabel} · pass {passNo} of 3 — {player.name}, pick 3 tiles to pass {DIR_WORD[dir]}
           </p>
         </header>
-
         <section className="tray">
           <div className="tiles">
             {sortHand(player.hand).map((t) => (
@@ -171,9 +196,7 @@ export default function App() {
             ))}
           </div>
         </section>
-
         <p className="select-info">Selected {selected.length} / 3 · jokers can&apos;t be passed</p>
-
         <footer className="controls">
           <button className="btn primary" disabled={selected.length !== 3} onClick={confirmPass}>
             Pass these 3 →
@@ -182,15 +205,12 @@ export default function App() {
             Skip Charleston
           </button>
         </footer>
-
-        <p className="hotseat-note">
-          Pass the device to {player.name} to choose, then to the next player after each pass.
-        </p>
+        <p className="hotseat-note">Pass the device to {player.name} to choose, then on to the next player.</p>
       </div>
     );
   }
 
-  /* ----- Charleston: second-Charleston decision ----- */
+  /* ----- Charleston: second-round decision ----- */
   if (state.phase === 'charlestonDecision') {
     return (
       <div className="table">
@@ -202,20 +222,77 @@ export default function App() {
         <div className="decision">
           <p>Run an optional second Charleston (3 more passes)?</p>
           <div className="controls">
-            <button
-              className="btn primary"
-              onClick={() => setState(applyAction(state, { type: 'charlestonSecond', agree: true }))}
-            >
+            <button className="btn primary" onClick={() => setState(applyAction(state, { type: 'charlestonSecond', agree: true }))}>
               Yes, pass again
             </button>
-            <button
-              className="btn"
-              onClick={() => setState(applyAction(state, { type: 'charlestonSecond', agree: false }))}
-            >
+            <button className="btn" onClick={() => setState(applyAction(state, { type: 'charlestonSecond', agree: false }))}>
               No — start playing
             </button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  /* ----- call window: a discard is claimable ----- */
+  if (state.phase === 'callWindow' && state.pendingDiscard) {
+    const callers = [0, 1, 2, 3]
+      .map((i) => ({ i, opts: callOptions(state, i) }))
+      .filter((c) => c.opts.pung || c.opts.kong || c.opts.mahjong);
+
+    function call(i: number, kind: 'pung' | 'kong' | 'mahjong') {
+      setState(applyAction(state, { type: 'call', player: i, kind }));
+    }
+
+    return (
+      <div className="table">
+        <style>{CSS}</style>
+        <header className="head">
+          <h1>mahj</h1>
+          <p className="status">{state.players[state.discarder!].name} discarded — anyone claim it?</p>
+        </header>
+
+        <Seats players={state.players} activeSeat={state.discarder!} />
+
+        <section className="discard-area">
+          <div className="discard-title">On the table</div>
+          <div className="tiles">
+            <TileView tile={state.pendingDiscard} drawn />
+          </div>
+        </section>
+
+        <div className="call-panel">
+          {callers.map(({ i, opts }) => (
+            <div className="caller-row" key={i}>
+              <span className="caller-name">{state.players[i].name} can:</span>
+              {opts.mahjong && (
+                <button className="btn glow" onClick={() => call(i, 'mahjong')}>
+                  Declare mahjong
+                </button>
+              )}
+              {opts.pung && (
+                <button className="btn" onClick={() => call(i, 'pung')}>
+                  Pung
+                </button>
+              )}
+              {opts.kong && (
+                <button className="btn" onClick={() => call(i, 'kong')}>
+                  Kong
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <footer className="controls">
+          <button className="btn primary" onClick={() => setState(applyAction(state, { type: 'passCall' }))}>
+            Pass — let it go
+          </button>
+          <button className="btn ghost" onClick={newGame}>
+            New game
+          </button>
+        </footer>
+        <p className="hotseat-note">Whoever wants the tile taps their call; otherwise tap Pass to continue.</p>
       </div>
     );
   }
@@ -263,14 +340,7 @@ export default function App() {
         <p className="status">{status}</p>
       </header>
 
-      <div className="seats">
-        {state.players.map((p, i) => (
-          <div key={p.id} className={`seat ${i === state.turn ? 'active' : ''}`}>
-            <span className="seat-name">{p.name}</span>
-            <span className="seat-count">{p.hand.length} tiles</span>
-          </div>
-        ))}
-      </div>
+      <Seats players={state.players} activeSeat={state.turn} />
 
       <section className="discard-area">
         <div className="discard-title">Discards</div>
@@ -300,8 +370,7 @@ export default function App() {
 
       {state.phase === 'won' && (
         <div className="banner win">
-          🎉 {state.players[state.winner!].name} wins with{' '}
-          <strong>{state.winningHand?.label}</strong>
+          🎉 {state.players[state.winner!].name} wins with <strong>{state.winningHand?.label}</strong>
         </div>
       )}
       {state.phase === 'exhausted' && (
@@ -330,8 +399,8 @@ export default function App() {
       {notice && <div className="notice">{notice}</div>}
 
       <p className="hotseat-note">
-        Single device for now — after you discard, pass it to the next player. (Playing across
-        separate devices comes next.)
+        Single device for now — pass it to the next player after each discard. (Separate-device play
+        comes next.)
       </p>
     </div>
   );
@@ -344,27 +413,17 @@ body { margin: 0; background: #0e3b2e; }
 #root { max-width: none; margin: 0; padding: 0; text-align: left; }
 
 .table {
-  min-height: 100vh;
-  box-sizing: border-box;
-  padding: 32px 20px 56px;
+  min-height: 100vh; box-sizing: border-box; padding: 32px 20px 56px;
   background: radial-gradient(120% 80% at 50% 0%, #1b5e46 0%, #0e3b2e 60%, #0a2c22 100%);
-  color: #eaf2ee;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 22px;
+  color: #eaf2ee; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  display: flex; flex-direction: column; align-items: center; gap: 22px;
 }
 
 .head { text-align: center; }
-.head h1 {
-  margin: 0;
-  font-family: Georgia, 'Times New Roman', serif;
-  font-size: 40px; letter-spacing: 2px; font-weight: 600; color: #f4ead2;
-}
+.head h1 { margin: 0; font-family: Georgia, 'Times New Roman', serif; font-size: 40px; letter-spacing: 2px; font-weight: 600; color: #f4ead2; }
 .status { margin: 6px 0 0; font-size: 14px; letter-spacing: 1px; color: #bcd8cb; max-width: 640px; }
 
-.seats { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.seats { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
 .seat {
   display: flex; flex-direction: column; align-items: center; min-width: 84px;
   padding: 8px 12px; border-radius: 10px;
@@ -373,6 +432,8 @@ body { margin: 0; background: #0e3b2e; }
 .seat.active { background: rgba(244,234,210,0.16); border-color: #f4ead2; box-shadow: 0 0 0 1px #f4ead2 inset; }
 .seat-name { font-size: 13px; font-weight: 600; color: #f4ead2; }
 .seat-count { font-size: 11px; color: #9cc3b2; margin-top: 2px; }
+.exposures { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; justify-content: center; }
+.meld { display: flex; gap: 2px; padding: 3px; border-radius: 6px; background: rgba(0,0,0,0.2); }
 
 .discard-area { width: 100%; max-width: 880px; text-align: center; }
 .discard-title { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #80a795; margin-bottom: 8px; }
@@ -392,8 +453,7 @@ body { margin: 0; background: #0e3b2e; }
   background: linear-gradient(180deg, #fffdf6 0%, #f3ecd9 100%);
   box-shadow: inset 0 1px 0 #ffffff, 0 3px 0 #cdbf9e, 0 6px 10px rgba(0,0,0,0.35);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-  user-select: none; cursor: default;
-  transition: transform 120ms ease, box-shadow 120ms ease;
+  user-select: none; cursor: default; transition: transform 120ms ease, box-shadow 120ms ease;
 }
 .tile.small { width: 38px; height: 52px; gap: 2px; }
 .tile.clickable { cursor: pointer; }
@@ -412,6 +472,10 @@ body { margin: 0; background: #0e3b2e; }
 
 .decision { text-align: center; display: flex; flex-direction: column; gap: 18px; align-items: center; }
 .decision p { font-size: 16px; color: #eaf2ee; margin: 0; }
+
+.call-panel { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.caller-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.caller-name { font-size: 14px; color: #f4ead2; font-weight: 600; }
 
 .banner { padding: 12px 20px; border-radius: 12px; font-size: 16px; font-weight: 600; text-align: center; }
 .banner.win { background: linear-gradient(180deg, #f6e7b8, #ecd28f); color: #5d3a1e; }
