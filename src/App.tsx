@@ -10,7 +10,7 @@ import {
   type Player,
 } from './game/game-engine';
 import { mockCard as exampleCard } from './game/card';
-import { suggestHands } from './game/matcher';
+import { suggestHands, planHand } from './game/matcher';
 import type { Tile, TileType } from './game/mahjong-data-model';
 
 /* ---------- tile display (shared) ---------- */
@@ -66,6 +66,8 @@ function TileView({
   small,
   selected,
   locked,
+  keep,
+  toss,
 }: {
   tile: Tile;
   onClick?: () => void;
@@ -73,6 +75,8 @@ function TileView({
   small?: boolean;
   selected?: boolean;
   locked?: boolean;
+  keep?: boolean;
+  toss?: boolean;
 }) {
   const f = tileFace(tile.type);
   const handleClick = locked ? undefined : onClick;
@@ -83,6 +87,8 @@ function TileView({
     drawn ? 'drawn' : '',
     selected ? 'selected' : '',
     locked ? 'locked' : '',
+    keep ? 'keep' : '',
+    toss ? 'toss' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -150,21 +156,35 @@ function OpponentRack({ player, tag }: { player: Player; tag?: string }) {
   );
 }
 
-function Suggestions({ tiles }: { tiles: Tile[] }) {
-  const sugg = suggestHands(tiles, exampleCard, 3);
+function Suggestions({
+  tiles,
+  selectedId,
+  onSelect,
+}: {
+  tiles: Tile[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const sugg = suggestHands(tiles, exampleCard, 5);
   return (
     <div className="suggestions">
-      <div className="sugg-title">Hands you&apos;re closest to</div>
+      <div className="sugg-title">Hands you&apos;re closest to — tap one to plan it</div>
       {sugg.map(({ hand, away }) => (
-        <div className="sugg-row" key={hand.id}>
-          <div className="sugg-main">
+        <button
+          type="button"
+          className={`sugg-row ${selectedId === hand.id ? 'active' : ''}`}
+          key={hand.id}
+          onClick={() => onSelect(hand.id)}
+          aria-pressed={selectedId === hand.id}
+        >
+          <span className="sugg-main">
             <span className="sugg-name">{hand.label}</span>
             <span className="sugg-desc">{hand.description ?? hand.section}</span>
-          </div>
+          </span>
           <span className={`sugg-away ${away === 0 ? 'done' : ''}`}>
             {away === 0 ? 'complete' : `${away} away`}
           </span>
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -256,11 +276,15 @@ export default function App() {
   const [selected, setSelected] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [showCard, setShowCard] = useState(false);
+  const [targetHand, setTargetHand] = useState<string | null>(null);
+
+  const selectTarget = (id: string) => setTargetHand((cur) => (cur === id ? null : id));
 
   function newGame() {
     setState(createGame(exampleCard));
     setSelected([]);
     setNotice(null);
+    setTargetHand(null);
   }
 
   let content: ReactNode;
@@ -285,6 +309,10 @@ export default function App() {
       setSelected([]);
     };
 
+    const targetLine = targetHand ? exampleCard.find((h) => h.id === targetHand) ?? null : null;
+    const plan = targetLine ? planHand(player.hand, targetLine) : null;
+    const keepSet = plan ? new Set(plan.keepIds) : null;
+
     content = (
       <>
         <header className="head">
@@ -300,13 +328,21 @@ export default function App() {
                 tile={t}
                 locked={isJoker(t)}
                 selected={selected.includes(t.id)}
+                keep={keepSet?.has(t.id) ?? false}
+                toss={keepSet != null && !keepSet.has(t.id) && !isJoker(t)}
                 onClick={() => toggle(t)}
               />
             ))}
           </div>
         </section>
         <p className="select-info">Selected {selected.length} / 3 · jokers can&apos;t be passed</p>
-        <Suggestions tiles={player.hand} />
+        {targetLine && plan && (
+          <p className="plan-line">
+            Planning <strong>{targetLine.label}</strong> — ringed tiles fit it, dimmed ones are pass
+            candidates · {plan.away} away
+          </p>
+        )}
+        <Suggestions tiles={player.hand} selectedId={targetHand} onSelect={selectTarget} />
         <footer className="controls">
           <button className="btn primary" disabled={selected.length !== 3} onClick={confirmPass}>
             Pass these 3 →
@@ -423,6 +459,9 @@ export default function App() {
     const winAvailable = winCheck(state) !== null;
     const playing = state.phase === 'playing';
     const youTiles = [...current.hand, ...current.exposures.flat()];
+    const targetLine = targetHand ? exampleCard.find((h) => h.id === targetHand) ?? null : null;
+    const plan = targetLine ? planHand(youTiles, targetLine) : null;
+    const keepSet = plan ? new Set(plan.keepIds) : null;
     const lastDiscardId =
       state.discards.length > 0 ? state.discards[state.discards.length - 1].id : null;
 
@@ -495,6 +534,8 @@ export default function App() {
                       key={t.id}
                       tile={t}
                       drawn={t.id === state.lastDrawnId}
+                      keep={keepSet?.has(t.id) ?? false}
+                      toss={keepSet != null && !keepSet.has(t.id)}
                       onClick={canDiscard ? () => discard(t.id) : undefined}
                     />
                   ))}
@@ -515,7 +556,17 @@ export default function App() {
                   </>
                 )}
               </footer>
-              {playing && <Suggestions tiles={youTiles} />}
+              {playing && (
+                <>
+                  {targetLine && plan && (
+                    <p className="plan-line">
+                      Planning <strong>{targetLine.label}</strong> — keep the ringed tiles, toss the
+                      dimmed ones · {plan.away} away
+                    </p>
+                  )}
+                  <Suggestions tiles={youTiles} selectedId={targetHand} onSelect={selectTarget} />
+                </>
+              )}
             </div>
           }
         />
@@ -651,6 +702,9 @@ body { margin: 0; background: #0e3b2e; }
 .tile.drawn { box-shadow: inset 0 1px 0 #fff, 0 3px 0 #cdbf9e, 0 0 0 3px #f4c64a, 0 6px 12px rgba(0,0,0,0.4); }
 .tile.selected { transform: translateY(-9px); box-shadow: inset 0 1px 0 #fff, 0 3px 0 #cdbf9e, 0 0 0 3px #5fb0e0, 0 8px 14px rgba(0,0,0,0.45); }
 .tile.locked { opacity: 0.4; cursor: not-allowed; }
+.tile.keep { outline: 3px solid #4cc98a; outline-offset: 2px; }
+.tile.toss { opacity: 0.42; }
+.tile.toss.clickable:hover { opacity: 0.85; }
 
 /* face-down tile */
 .tile.back {
@@ -667,15 +721,25 @@ body { margin: 0; background: #0e3b2e; }
 .tile.small .tile-label { font-size: 7px; }
 
 .select-info { font-size: 13px; color: #bcd8cb; margin: 0; }
+.plan-line { font-size: 13px; color: #ffe6b0; margin: 0; max-width: 560px; text-align: center; }
+.plan-line strong { color: #fff; }
 .decision { text-align: center; display: flex; flex-direction: column; gap: 18px; align-items: center; }
 .decision p { font-size: 16px; color: #eaf2ee; margin: 0; }
 
 /* suggestions */
 .suggestions { width: 100%; max-width: 520px; background: rgba(0,0,0,0.28); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 10px 12px; }
 .sugg-title { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: #80a795; margin-bottom: 6px; text-align: center; }
-.sugg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(255,255,255,0.06); }
+.sugg-row {
+  appearance: none; border: none; background: transparent; cursor: pointer; width: 100%;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 8px; border-top: 1px solid rgba(255,255,255,0.06); border-radius: 8px;
+  color: inherit; font: inherit; transition: background 100ms ease, box-shadow 100ms ease;
+}
+.sugg-row:hover { background: rgba(255,255,255,0.05); }
+.sugg-row:focus-visible { outline: 2px solid #9cc3b2; outline-offset: 1px; }
+.sugg-row.active { background: rgba(244,198,74,0.16); box-shadow: inset 3px 0 0 #f4c64a; border-top-color: transparent; }
 .sugg-row:first-of-type { border-top: none; }
-.sugg-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sugg-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; text-align: left; }
 .sugg-name { font-weight: 700; color: #f4ead2; font-size: 13px; }
 .sugg-desc { font-size: 11px; color: #9cc3b2; }
 .sugg-away { font-size: 12px; color: #ffd9a8; font-weight: 600; white-space: nowrap; }

@@ -231,20 +231,29 @@ export interface HandSuggestion {
   away: number; // how many tiles you'd need to swap to complete it (0 = done)
 }
 
+export interface HandPlan {
+  away: number; // how many tiles you'd need to draw/swap to complete it (0 = done)
+  keepIds: string[]; // ids of YOUR tiles that fit this hand's best assignment
+}
+
 /**
- * Fewest tiles you are from completing this hand, over every legal assignment.
+ * The best way to build this hand from your tiles: which of your tiles fit
+ * (keepIds) and how far off you are (away), over every legal assignment.
  * Counts real tiles that fit, plus jokers filling joker-eligible (pung+) slots.
+ * The tiles you hold that are NOT in keepIds are the discard candidates.
  */
-export function handCloseness(tiles: Tile[], hand: HandLine): number {
-  const reals = new Map<string, number>();
-  let jokers = 0;
+export function planHand(tiles: Tile[], hand: HandLine): HandPlan {
+  const realsByKey = new Map<string, Tile[]>();
+  const jokerTiles: Tile[] = [];
   for (const t of tiles) {
     if (t.type.kind === 'joker') {
-      jokers += 1;
+      jokerTiles.push(t);
       continue;
     }
     const k = tileKeyFromType(t.type);
-    reals.set(k, (reals.get(k) ?? 0) + 1);
+    const arr = realsByKey.get(k);
+    if (arr) arr.push(t);
+    else realsByKey.set(k, [t]);
   }
 
   const usedSlots = [
@@ -254,7 +263,7 @@ export function handCloseness(tiles: Tile[], hand: HandLine): number {
   const vars = hand.variables ?? [];
   const varCombos: number[][] = vars.length ? cartesian(vars.map((v) => v.domain)) : [[]];
 
-  let best = 14;
+  let best: HandPlan = { away: 14, keepIds: [] };
   for (const suits of suitCombos) {
     if (!suitAssignmentLegal(hand, suits)) continue;
     const suitMap: Partial<Record<SuitSlot, Suit>> = {};
@@ -278,22 +287,30 @@ export function handCloseness(tiles: Tile[], hand: HandLine): number {
         need.set(key, cur);
       }
 
-      let matched = 0;
+      const keepIds: string[] = [];
       let jokerableLeft = 0;
       for (const [key, { strict, jokerable }] of need) {
-        const have = reals.get(key) ?? 0;
-        const used = Math.min(have, strict + jokerable);
-        matched += used;
+        const have = realsByKey.get(key) ?? [];
+        const used = Math.min(have.length, strict + jokerable);
+        for (let n = 0; n < used; n++) keepIds.push(have[n].id);
         jokerableLeft += jokerable - Math.max(0, used - strict);
       }
-      matched += Math.min(jokers, jokerableLeft);
+      const jokerUse = Math.min(jokerTiles.length, jokerableLeft);
+      for (let n = 0; n < jokerUse; n++) keepIds.push(jokerTiles[n].id);
 
-      const away = 14 - matched;
-      if (away < best) best = away;
-      if (best === 0) return 0;
+      const away = 14 - keepIds.length;
+      if (away < best.away) best = { away, keepIds };
+      if (best.away === 0) return best;
     }
   }
   return best;
+}
+
+/**
+ * Fewest tiles you are from completing this hand, over every legal assignment.
+ */
+export function handCloseness(tiles: Tile[], hand: HandLine): number {
+  return planHand(tiles, hand).away;
 }
 
 /** The hands your tiles are closest to, nearest first. */
